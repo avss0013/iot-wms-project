@@ -15,6 +15,7 @@ import threading
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 import paho.mqtt.client as mqtt
+from database_setup import initialize_database
 
 # --- Application Setup ---
 app = Flask(__name__)
@@ -44,6 +45,9 @@ def get_db_connection():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row  # This allows accessing columns by name
     return conn
+
+
+initialize_database(DATABASE)
 
 # --- MQTT Client Logic ---
 # Handles communication from the ESP32 RFID sensor.
@@ -124,6 +128,18 @@ def get_storage_locations():
     return jsonify(locations)
 
 
+@app.route('/api/items', methods=['GET'])
+def get_items():
+    """Returns the inventory items available for order creation."""
+    print("[API GET] /api/items")
+    with get_db_connection() as conn:
+        items_cursor = conn.execute(
+            'SELECT item_id, qr_code_data, description, location_id FROM items ORDER BY item_id DESC'
+        ).fetchall()
+        items = [dict(row) for row in items_cursor]
+    return jsonify(items)
+
+
 # --- Order (Job) Management Endpoints ---
 
 @app.route('/api/orders', methods=['GET'])
@@ -131,29 +147,148 @@ def get_orders():
     """Returns a list of all jobs from the database."""
     print("[API GET] /api/orders")
     with get_db_connection() as conn:
-        jobs_cursor = conn.execute('SELECT job_id, job_type, status FROM jobs ORDER BY job_id DESC').fetchall()
+        jobs_cursor = conn.execute(
+            '''
+            SELECT job_id, job_type, item_id, status, assigned_to, notes, created_at, updated_at
+            FROM jobs
+            ORDER BY job_id DESC
+            '''
+        ).fetchall()
         jobs = [dict(row) for row in jobs_cursor]
     return jsonify(jobs)
 
 @app.route('/api/orders', methods=['POST'])
 def create_order():
     """Creates a new job in the database."""
-    data = request.json
-    job_type = data.get('job_type')
+    data = request.get_json(silent=True) or {}
+    job_type = data.get('job_type', '').strip()
     item_id = data.get('item_id')
+    notes = (data.get('notes') or '').strip()
     print(f"[API POST] /api/orders - Creating new {job_type} job for item {item_id}")
     
     if not job_type or not item_id:
         return jsonify({"message": "Missing 'job_type' or 'item_id'"}), 400
 
+    try:
+        item_id = int(item_id)
+    except (TypeError, ValueError):
+        return jsonify({"message": "'item_id' must be a number"}), 400
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO jobs (job_type, item_id, status) VALUES (?, ?, ?)',
-                       (job_type, item_id, 'Pending'))
+        cursor.execute(
+            '''
+            INSERT INTO jobs (job_type, item_id, status, assigned_to, notes)
+            VALUES (?, ?, ?, ?, ?)
+            ''',
+            (job_type, item_id, 'Pending', None, notes)
+        )
         conn.commit()
         new_job_id = cursor.lastrowid
     
     return jsonify({"message": "Order created successfully.", "job_id": new_job_id}), 201
+
+
+@app.route('/api/orders/claim-next', methods=['POST'])
+def claim_next_order():
+    """Assigns the oldest pending order to the requesting worker."""
+    data = request.get_json(silent=True) or {}
+    worker_name = (data.get('worker_name') or 'Worker').strip() or 'Worker'
+    print(f"[API POST] /api/orders/claim-next - {worker_name}")
+
+    with get_db_connection() as conn:
+        order = conn.execute(
+            '''
+            SELECT job_id
+            FROM jobs
+            WHERE status = 'Pending'
+            ORDER BY created_at ASC, job_id ASC
+            LIMIT 1
+            '''
+        ).fetchone()
+
+        if not order:
+            return jsonify({"message": "No pending orders available."}), 404
+
+        conn.execute(
+            '''
+            UPDATE jobs
+            SET status = ?, assigned_to = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE job_id = ?
+            ''',
+            ('In Progress', worker_name, order['job_id'])
+        )
+        conn.commit()
+
+    return jsonify({"message": "Order claimed successfully.", "job_id": order['job_id']})
+
+
+@app.route('/api/orders/<int:job_id>/claim', methods=['POST'])
+def claim_order(job_id):
+    """Assigns a specific pending order to the requesting worker."""
+    data = request.get_json(silent=True) or {}
+    worker_name = (data.get('worker_name') or 'Worker').strip() or 'Worker'
+    print(f"[API POST] /api/orders/{job_id}/claim - {worker_name}")
+
+    with get_db_connection() as conn:
+        order = conn.execute('SELECT job_id, status FROM jobs WHERE job_id = ?', (job_id,)).fetchone()
+        if not order:
+            return jsonify({"message": "Order not found."}), 404
+
+        if order['status'] != 'Pending':
+            return jsonify({"message": "Only pending orders can be claimed."}), 409
+
+        conn.execute(
+            '''
+            UPDATE jobs
+            SET status = ?, assigned_to = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE job_id = ?
+            ''',
+            ('In Progress', worker_name, job_id)
+        )
+        conn.commit()
+
+    return jsonify({"message": "Order claimed successfully.", "job_id": job_id})
+
+
+@app.route('/api/orders/<int:job_id>/complete', methods=['POST'])
+def complete_order(job_id):
+    """Marks an order as completed."""
+    data = request.get_json(silent=True) or {}
+    worker_name = (data.get('worker_name') or 'Worker').strip() or 'Worker'
+    print(f"[API POST] /api/orders/{job_id}/complete - {worker_name}")
+
+    with get_db_connection() as conn:
+        order = conn.execute('SELECT job_id, status FROM jobs WHERE job_id = ?', (job_id,)).fetchone()
+        if not order:
+            return jsonify({"message": "Order not found."}), 404
+
+        conn.execute(
+            '''
+            UPDATE jobs
+            SET status = ?, assigned_to = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE job_id = ?
+            ''',
+            ('Completed', worker_name, job_id)
+        )
+        conn.commit()
+
+    return jsonify({"message": "Order completed successfully.", "job_id": job_id})
+
+
+@app.route('/api/dashboard/summary', methods=['GET'])
+def get_dashboard_summary():
+    """Returns lightweight counts for the dashboard cards."""
+    print("[API GET] /api/dashboard/summary")
+    with get_db_connection() as conn:
+        summary = {
+            'locations': conn.execute('SELECT COUNT(*) AS count FROM locations').fetchone()['count'],
+            'items': conn.execute('SELECT COUNT(*) AS count FROM items').fetchone()['count'],
+            'pending_orders': conn.execute("SELECT COUNT(*) AS count FROM jobs WHERE status = 'Pending'").fetchone()['count'],
+            'in_progress_orders': conn.execute("SELECT COUNT(*) AS count FROM jobs WHERE status = 'In Progress'").fetchone()['count'],
+            'completed_orders': conn.execute("SELECT COUNT(*) AS count FROM jobs WHERE status = 'Completed'").fetchone()['count'],
+        }
+    return jsonify(summary)
 
 
 # --- Alarms Endpoint ---
@@ -172,10 +307,67 @@ def get_alarms():
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve(path):
+    # Never serve static files for /api/* requests
+    if path.startswith('api/'):
+        return jsonify({"message": "Not found"}), 404
+    
     if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
         return send_from_directory(app.static_folder, path)
     else:
         return send_from_directory(app.static_folder, 'index.html')
+
+
+@app.route('/api/locations', methods=['POST'])
+def create_location():
+    """Creates a new storage location."""
+    data = request.get_json(silent=True) or {}
+    rfid_uid = (data.get('rfid_uid') or '').strip()
+    description = (data.get('description') or '').strip()
+    print(f"[API POST] /api/locations - Creating {description} with RFID {rfid_uid}")
+
+    if not rfid_uid or not description:
+        return jsonify({"message": "Missing 'rfid_uid' or 'description'"}), 400
+
+    with get_db_connection() as conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT INTO locations (rfid_uid, description) VALUES (?, ?)',
+                (rfid_uid, description)
+            )
+            conn.commit()
+            location_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return jsonify({"message": "RFID UID already exists"}), 409
+
+    return jsonify({"message": "Location created successfully.", "location_id": location_id}), 201
+
+
+@app.route('/api/items', methods=['POST'])
+def create_item():
+    """Creates a new inventory item."""
+    data = request.get_json(silent=True) or {}
+    qr_code_data = (data.get('qr_code_data') or '').strip()
+    description = (data.get('description') or '').strip()
+    location_id = data.get('location_id')
+    print(f"[API POST] /api/items - Creating {description} with QR {qr_code_data}")
+
+    if not qr_code_data or not description:
+        return jsonify({"message": "Missing 'qr_code_data' or 'description'"}), 400
+
+    with get_db_connection() as conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT INTO items (qr_code_data, description, location_id) VALUES (?, ?, ?)',
+                (qr_code_data, description, location_id)
+            )
+            conn.commit()
+            item_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return jsonify({"message": "QR code already exists"}), 409
+
+    return jsonify({"message": "Item created successfully.", "item_id": item_id}), 201
 
 
 # ==============================================================================
@@ -187,11 +379,16 @@ if __name__ == '__main__':
     mqtt_client = mqtt.Client()
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
-    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-    
-    mqtt_thread = threading.Thread(target=mqtt_client.loop_forever)
-    mqtt_thread.daemon = True
-    mqtt_thread.start()
+    mqtt_thread = None
+
+    try:
+        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        mqtt_thread = threading.Thread(target=mqtt_client.loop_forever)
+        mqtt_thread.daemon = True
+        mqtt_thread.start()
+    except OSError as exc:
+        print(f"[MQTT] Broker unavailable at {MQTT_BROKER}:{MQTT_PORT} - {exc}")
+        print("[MQTT] Continuing without live RFID ingestion.")
 
     # --- Run the Flask Web Server ---
     # It will serve the API and the front-end on port 8080.
