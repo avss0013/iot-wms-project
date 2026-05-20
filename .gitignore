@@ -1,0 +1,21 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Node.js (for your front-end)
+node_modules/
+dist/
+.env
+
+# Database file (never commit your database)
+*.db
+*.sqlite3
+
+# PlatformIO (for your ESP32)
+.pio/
+.vscode/
+
+# OS-specific
+.DS_Store
+Thumbs.db
