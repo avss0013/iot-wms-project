@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Central Server Dashboard</title>
+    <meta
+      name="description"
+      content="IoT WMS dashboard for manager and worker operations"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
+  </head>
+  <body>
+    <div class="backdrop backdrop-a"></div>
+    <div class="backdrop backdrop-b"></div>
+
+    <div class="shell">
+      <header class="topbar glass">
+        <div class="brand">
+          <div class="brand-mark">IW</div>
+          <div>
+            <p class="eyebrow">IoT Intelligent Warehouse</p>
+            <h1>Central Server Dashboard</h1>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="role-switch" role="tablist" aria-label="Dashboard views">
+            <button class="role-button is-active" data-role-button="manager" type="button">Manager</button>
+            <button class="role-button" data-role-button="worker" type="button">Worker</button>
+          </div>
+          <div class="live-pill">
+            <span class="pulse"></span>
+            Live system
+          </div>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="hero glass">
+          <div class="hero-copy">
+            <p class="eyebrow">Warehouse operations control</p>
+            <h2>One dashboard for control, queue handling, and live system visibility.</h2>
+            <p class="lede">
+              Switch between Manager and Worker views to create orders, claim the next job, and complete tasks without leaving the dashboard.
+            </p>
+            <div class="hero-actions">
+              <button class="primary" data-action="refresh">Refresh data</button>
+              <button class="secondary" data-action="claim-next">Claim next order</button>
+            </div>
+          </div>
+
+          <div class="status-card">
+            <div class="status-ring" id="statusRing">
+              <div>
+                <p class="status-label">System status</p>
+                <strong id="systemStatus">IDLE</strong>
+              </div>
+            </div>
+            <div class="status-meta">
+              <div>
+                <span>Active order</span>
+                <strong id="activeOrder">None</strong>
+              </div>
+              <div>
+                <span>MQTT</span>
+                <strong id="mqttState">Connected when broker is available</strong>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="stats-grid" aria-label="Dashboard metrics">
+          <article class="metric glass">
+            <span>Locations</span>
+            <strong id="metricLocations">0</strong>
+          </article>
+          <article class="metric glass">
+            <span>Items</span>
+            <strong id="metricItems">0</strong>
+          </article>
+          <article class="metric glass">
+            <span>Pending</span>
+            <strong id="metricPending">0</strong>
+          </article>
+          <article class="metric glass">
+            <span>In progress</span>
+            <strong id="metricInProgress">0</strong>
+          </article>
+          <article class="metric glass">
+            <span>Completed</span>
+            <strong id="metricCompleted">0</strong>
+          </article>
+        </section>
+
+        <section class="charts-grid" aria-label="Analytics">
+          <article class="panel glass">
+            <div class="panel-head">
+              <p class="eyebrow">Order trends</p>
+              <h3>Last 7 days</h3>
+            </div>
+            <div class="chart-container">
+              <canvas id="ordersChart"></canvas>
+            </div>
+          </article>
+
+          <article class="panel glass">
+            <div class="panel-head">
+              <p class="eyebrow">Order distribution</p>
+              <h3>By status</h3>
+            </div>
+            <div class="chart-container small">
+              <canvas id="statusChart"></canvas>
+            </div>
+          </article>
+        </section>
+
+        <section class="shelf-section glass">
+          <div class="panel-head">
+            <p class="eyebrow">Warehouse layout</p>
+            <h3>Active storage racks</h3>
+          </div>
+          <div class="shelf-grid" id="shelfGrid"></div>
+        </section>
+
+        <section class="grid-2">
+          <article class="panel glass">
+            <div class="panel-head">
+              <p class="eyebrow">Manage inventory</p>
+              <h3>Add new item</h3>
+            </div>
+            <form id="itemForm" class="card-form">
+              <label>
+                QR code data
+                <input name="qr_code_data" type="text" placeholder="ITEM-001" required />
+              </label>
+              <label>
+                Description
+                <input name="description" type="text" placeholder="Blue container bolts" required />
+              </label>
+              <label>
+                Location
+                <select name="location_id" id="itemLocationSelect"></select>
+              </label>
+              <div class="form-actions full-width">
+                <button class="primary" type="submit">Add item</button>
+                <span id="itemFormMessage" class="form-message"></span>
+              </div>
+            </form>
+          </article>
+
+          <article class="panel glass">
+            <div class="panel-head">
+              <p class="eyebrow">Manage storage</p>
+              <h3>Add new location</h3>
+            </div>
+            <form id="locationForm" class="card-form">
+              <label>
+                RFID tag UID
+                <input name="rfid_uid" type="text" placeholder="12345678" required />
+              </label>
+              <label>
+                Location name
+                <input name="description" type="text" placeholder="Rack A1" required />
+              </label>
+              <div class="form-actions full-width">
+                <button class="primary" type="submit">Add location</button>
+                <span id="locationFormMessage" class="form-message"></span>
+              </div>
+            </form>
+          </article>
+        </section>
+
+        <section class="grid-2">
+          <article class="panel glass">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Orders</p>
+                <h3>Live order book</h3>
+              </div>
+              <div class="panel-badge">Realtime</div>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Type</th>
+                    <th>Item</th>
+                    <th>Status</th>
+                    <th>Assigned</th>
+                    <th>Updated</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="ordersTable"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel glass">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Storage</p>
+                <h3>Locations and alarms</h3>
+              </div>
+              <div class="panel-badge muted">Monitoring</div>
+            </div>
+
+            <div id="locationList" class="stack-list"></div>
+            <div class="divider"></div>
+            <div id="alarmList" class="alarm-list"></div>
+          </article>
+        </section>
+
+        <section class="grid-2">
+          <article class="panel glass view manager-view is-visible" data-view="manager">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Manager view</p>
+                <h3>Create and supervise orders</h3>
+              </div>
+              <div class="panel-badge">Control</div>
+            </div>
+
+            <form id="orderForm" class="card-form">
+              <label>
+                Order type
+                <input name="job_type" type="text" placeholder="Pick, Putaway, Replenish" required />
+              </label>
+              <label>
+                Item
+                <select name="item_id" id="itemSelect" required></select>
+              </label>
+              <label class="full-width">
+                Notes
+                <textarea name="notes" rows="4" placeholder="Add a short instruction for the worker"></textarea>
+              </label>
+              <div class="form-actions full-width">
+                <button class="primary" type="submit">Create order</button>
+                <span id="formMessage" class="form-message"></span>
+              </div>
+            </form>
+
+            <div class="control-row">
+              <button class="secondary" data-system-action="start" type="button">Start</button>
+              <button class="secondary" data-system-action="pause" type="button">Pause</button>
+              <button class="secondary" data-system-action="stop" type="button">Stop</button>
+              <button class="ghost" data-system-action="reset" type="button">Reset alarms</button>
+            </div>
+          </article>
+
+          <article class="panel glass view worker-view is-visible" data-view="worker">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Worker view</p>
+                <h3>Take the next order in queue</h3>
+              </div>
+              <div class="panel-badge accent">Execution</div>
+            </div>
+
+            <div class="worker-tools">
+              <label>
+                Worker name
+                <input id="workerName" type="text" placeholder="Worker A" value="Worker A" />
+              </label>
+              <div class="worker-actions">
+                <button class="primary" id="claimNextButton" type="button">Claim next order</button>
+                <button class="ghost" id="refreshWorkerButton" type="button">Refresh queue</button>
+              </div>
+            </div>
+
+            <div id="workerQueue" class="queue-list"></div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <template id="queueTemplate">
+      <article class="queue-item">
+        <div>
+          <strong class="queue-title"></strong>
+          <p class="queue-meta"></p>
+        </div>
+        <button class="secondary queue-complete" type="button">Complete</button>
+      </article>
+    </template>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
