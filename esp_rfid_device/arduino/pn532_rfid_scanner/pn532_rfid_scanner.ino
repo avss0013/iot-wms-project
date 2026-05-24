@@ -25,7 +25,7 @@
 // --- Configuration ---
 const char* SSID = "ODesigns";
 const char* PASSWORD = "omartaher2004";
-const char* SERVER_IP = "192.168.100.18"; // set to your PC/server IP
+const char* SERVER_IP = "192.168.100.71"; // set to your PC/server IP
 const int SERVER_PORT = 5000;
 const char* DEVICE_ID = "RFID_SCANNER_PN532_01";
 const char* LOCATION = "Rack A1"; // or Rack A2 / Rack B1 / Rack B2

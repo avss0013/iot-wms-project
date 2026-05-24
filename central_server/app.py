@@ -156,7 +156,7 @@ def get_items():
     print("[API GET] /api/items")
     with get_db_connection() as conn:
         items_cursor = conn.execute(
-            'SELECT item_id, qr_code_data, description, location_id FROM items ORDER BY item_id DESC'
+            'SELECT item_id, qr_code_data, rfid_uid, description, location_id, quantity FROM items ORDER BY item_id DESC'
         ).fetchall()
         items = [dict(row) for row in items_cursor]
     return jsonify(items)
@@ -186,6 +186,7 @@ def create_order():
     job_type = data.get('job_type', '').strip()
     item_id = data.get('item_id')
     notes = (data.get('notes') or '').strip()
+    require_scan = data.get('require_scan', True)
     print(f"[API POST] /api/orders - Creating new {job_type} job for item {item_id}")
     
     if not job_type or not item_id:
@@ -198,17 +199,75 @@ def create_order():
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        initial_status = 'Awaiting Scan' if require_scan else 'Pending'
         cursor.execute(
             '''
             INSERT INTO jobs (job_type, item_id, status, assigned_to, notes)
             VALUES (?, ?, ?, ?, ?)
             ''',
-            (job_type, item_id, 'Pending', None, notes)
+            (job_type, item_id, initial_status, None, notes)
         )
         conn.commit()
         new_job_id = cursor.lastrowid
     
-    return jsonify({"message": "Order created successfully.", "job_id": new_job_id}), 201
+    return jsonify({
+        "message": "Order created successfully.",
+        "job_id": new_job_id,
+        "status": initial_status,
+        "requires_scan": bool(require_scan)
+    }), 201
+
+
+@app.route('/api/orders/<int:job_id>/confirm-scan', methods=['POST'])
+def confirm_order_scan(job_id):
+    """Confirms job creation by validating an RFID item tag scan."""
+    data = request.get_json(silent=True) or {}
+    tag_uid = (data.get('tag_uid') or '').strip().upper()
+    worker_name = (data.get('worker_name') or '').strip()
+
+    if not tag_uid:
+        return jsonify({"message": "Missing 'tag_uid'"}), 400
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        job = cursor.execute('SELECT job_id, item_id, status FROM jobs WHERE job_id = ?', (job_id,)).fetchone()
+        if not job:
+            return jsonify({"message": "Order not found."}), 404
+
+        if job['status'] not in ('Awaiting Scan', 'Pending'):
+            return jsonify({"message": "Order is not awaiting creation scan."}), 409
+
+        item = cursor.execute('SELECT rfid_uid FROM items WHERE item_id = ?', (job['item_id'],)).fetchone()
+        if not item or not item['rfid_uid']:
+            return jsonify({"message": "Order item has no registered RFID UID."}), 409
+
+        expected_uid = (item['rfid_uid'] or '').strip().upper()
+        if expected_uid != tag_uid:
+            return jsonify({"message": "Scanned tag does not match selected item.", "expected_tag_uid": expected_uid}), 409
+
+        assigned_to = worker_name if worker_name else None
+        if assigned_to:
+            cursor.execute(
+                '''
+                UPDATE jobs
+                SET status = ?, assigned_to = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ?
+                ''',
+                ('In Progress', assigned_to, job_id)
+            )
+        else:
+            cursor.execute(
+                '''
+                UPDATE jobs
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ?
+                ''',
+                ('In Progress', job_id)
+            )
+
+        conn.commit()
+
+    return jsonify({"message": "Order scan confirmed.", "job_id": job_id, "status": "In Progress"})
 
 
 @app.route('/api/orders/claim-next', methods=['POST'])
@@ -371,7 +430,7 @@ def rfid_read():
     data = request.get_json(silent=True) or {}
     device_id = data.get('device_id')
     location = data.get('location')
-    tag_uid = (data.get('tag_uid') or '').strip()
+    tag_uid = (data.get('tag_uid') or '').strip().upper()
     print(f"[API POST] /api/rfid/read - device={device_id} tag={tag_uid} location={location}")
 
     if not tag_uid:
@@ -381,7 +440,7 @@ def rfid_read():
         cursor = conn.cursor()
 
         # Check if tag corresponds to a storage location
-        loc = cursor.execute('SELECT location_id, description FROM locations WHERE rfid_uid = ?', (tag_uid,)).fetchone()
+        loc = cursor.execute('SELECT location_id, description FROM locations WHERE UPPER(rfid_uid) = ?', (tag_uid,)).fetchone()
         if loc:
             # Find an In Progress job for an item located at this location
             job = cursor.execute(
@@ -406,8 +465,32 @@ def rfid_read():
             return jsonify({"message": "Location scanned but no matching In Progress job found."}), 200
 
         # Check if tag matches an item RFID
-        item = cursor.execute('SELECT item_id, location_id FROM items WHERE rfid_uid = ?', (tag_uid,)).fetchone()
+        item = cursor.execute('SELECT item_id, location_id FROM items WHERE UPPER(rfid_uid) = ?', (tag_uid,)).fetchone()
         if item:
+            # If job was created with require_scan=true, first scan confirms and advances it.
+            awaiting_job = cursor.execute(
+                "SELECT job_id FROM jobs WHERE item_id = ? AND status = 'Awaiting Scan' ORDER BY created_at ASC, job_id ASC LIMIT 1",
+                (item['item_id'],)
+            ).fetchone()
+
+            if awaiting_job:
+                claimant = (data.get('worker_name') or device_id or 'AutoClaim').strip() or 'AutoClaim'
+                cursor.execute(
+                    '''
+                    UPDATE jobs
+                    SET status = ?, assigned_to = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = ?
+                    ''',
+                    ('Item Scanned', claimant, awaiting_job['job_id'])
+                )
+                conn.commit()
+                return jsonify({
+                    "message": "Item RFID accepted and selected job confirmed.",
+                    "job_id": awaiting_job['job_id'],
+                    "status": "Item Scanned",
+                    "assigned_to": claimant
+                })
+
             # Find job for this item that is At Location or In Progress
             job = cursor.execute(
                 "SELECT job_id, status FROM jobs WHERE item_id = ? AND status IN ('At Location','In Progress') LIMIT 1",
@@ -522,7 +605,7 @@ def create_item():
     """Creates a new inventory item."""
     data = request.get_json(silent=True) or {}
     qr_code_data = (data.get('qr_code_data') or '').strip()
-    rfid_uid = (data.get('rfid_uid') or '').strip() or None
+    rfid_uid = (data.get('rfid_uid') or '').strip().upper() or None
     description = (data.get('description') or '').strip()
     location_id = data.get('location_id')
     quantity = data.get('quantity', 1)
