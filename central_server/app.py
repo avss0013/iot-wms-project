@@ -171,7 +171,7 @@ def get_orders():
     with get_db_connection() as conn:
         jobs_cursor = conn.execute(
             '''
-            SELECT job_id, job_type, item_id, status, assigned_to, notes, created_at, updated_at
+            SELECT job_id, job_type, item_id, requested_quantity, picked_quantity, unit, status, assigned_to, notes, created_at, updated_at
             FROM jobs
             ORDER BY job_id DESC
             '''
@@ -187,6 +187,8 @@ def create_order():
     item_id = data.get('item_id')
     notes = (data.get('notes') or '').strip()
     require_scan = data.get('require_scan', True)
+    requested_quantity = data.get('requested_quantity')
+    unit = (data.get('unit') or 'pcs').strip()
     print(f"[API POST] /api/orders - Creating new {job_type} job for item {item_id}")
     
     if not job_type or not item_id:
@@ -197,15 +199,25 @@ def create_order():
     except (TypeError, ValueError):
         return jsonify({"message": "'item_id' must be a number"}), 400
 
+    if requested_quantity not in (None, ''):
+        try:
+            requested_quantity = int(requested_quantity)
+        except (TypeError, ValueError):
+            return jsonify({"message": "'requested_quantity' must be a number"}), 400
+        if requested_quantity <= 0:
+            return jsonify({"message": "'requested_quantity' must be greater than zero"}), 400
+    else:
+        requested_quantity = None
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         initial_status = 'Awaiting Scan' if require_scan else 'Pending'
         cursor.execute(
             '''
-            INSERT INTO jobs (job_type, item_id, status, assigned_to, notes)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO jobs (job_type, item_id, requested_quantity, picked_quantity, unit, status, assigned_to, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''',
-            (job_type, item_id, initial_status, None, notes)
+            (job_type, item_id, requested_quantity, 0, unit, initial_status, None, notes)
         )
         conn.commit()
         new_job_id = cursor.lastrowid
@@ -214,7 +226,9 @@ def create_order():
         "message": "Order created successfully.",
         "job_id": new_job_id,
         "status": initial_status,
-        "requires_scan": bool(require_scan)
+        "requires_scan": bool(require_scan),
+        "requested_quantity": requested_quantity,
+        "unit": unit
     }), 201
 
 
@@ -306,7 +320,11 @@ def claim_next_order():
 
 @app.route('/api/orders/<int:job_id>/claim', methods=['POST'])
 def claim_order(job_id):
-    """Assigns a specific pending order to the requesting worker."""
+    """Assigns a specific order to the requesting worker.
+
+    - Pending -> In Progress
+    - Awaiting Scan -> keep status, just assign worker
+    """
     data = request.get_json(silent=True) or {}
     worker_name = (data.get('worker_name') or 'Worker').strip() or 'Worker'
     print(f"[API POST] /api/orders/{job_id}/claim - {worker_name}")
@@ -316,8 +334,11 @@ def claim_order(job_id):
         if not order:
             return jsonify({"message": "Order not found."}), 404
 
-        if order['status'] != 'Pending':
-            return jsonify({"message": "Only pending orders can be claimed."}), 409
+        status = (order['status'] or '').strip()
+        if status not in ('Pending', 'Awaiting Scan'):
+            return jsonify({"message": "Only pending or awaiting-scan orders can be claimed."}), 409
+
+        next_status = 'In Progress' if status == 'Pending' else 'Awaiting Scan'
 
         conn.execute(
             '''
@@ -325,7 +346,7 @@ def claim_order(job_id):
             SET status = ?, assigned_to = ?, updated_at = CURRENT_TIMESTAMP
             WHERE job_id = ?
             ''',
-            ('In Progress', worker_name, job_id)
+            (next_status, worker_name, job_id)
         )
         conn.commit()
 
@@ -424,6 +445,15 @@ def create_location():
     return jsonify({"message": "Location created successfully.", "location_id": location_id}), 201
 
 
+@app.route('/api/locations', methods=['GET'])
+def list_locations():
+    """Returns all locations with ids and RFID tags."""
+    with get_db_connection() as conn:
+        rows = conn.execute('SELECT location_id, rfid_uid, description FROM locations ORDER BY location_id ASC').fetchall()
+        data = [dict(row) for row in rows]
+    return jsonify(data)
+
+
 @app.route('/api/rfid/read', methods=['POST'])
 def rfid_read():
     """Endpoint for devices to POST RFID reads (used by ESP32 scanner)."""
@@ -493,7 +523,7 @@ def rfid_read():
 
             # Find job for this item that is At Location or In Progress
             job = cursor.execute(
-                "SELECT job_id, status FROM jobs WHERE item_id = ? AND status IN ('At Location','In Progress') LIMIT 1",
+                "SELECT job_id, status FROM jobs WHERE item_id = ? AND status IN ('At Location','In Progress','Partially Picked') LIMIT 1",
                 (item['item_id'],)
             ).fetchone()
 
@@ -572,7 +602,7 @@ def qr_read():
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        job = cursor.execute('SELECT job_id, item_id, status FROM jobs WHERE job_id = ?', (job_id,)).fetchone()
+        job = cursor.execute('SELECT job_id, item_id, status, requested_quantity, picked_quantity FROM jobs WHERE job_id = ?', (job_id,)).fetchone()
         if not job:
             return jsonify({"message": "Job not found."}), 404
 
@@ -580,24 +610,53 @@ def qr_read():
         if not item or item['qr_code_data'] != qr_code:
             return jsonify({"message": "QR code does not match job item."}), 409
 
-        # Update quantity if provided
-        if quantity is not None:
-            try:
-                q = int(quantity)
-            except (TypeError, ValueError):
-                return jsonify({"message": "'quantity' must be an integer"}), 400
+        # For textile workflows quantity is the core confirmation signal.
+        if quantity is None:
+            quantity = 1
 
-            new_qty = max(0, (item['quantity'] or 0) - q)
-            cursor.execute('UPDATE items SET quantity = ? WHERE item_id = ?', (new_qty, item['item_id']))
+        try:
+            q = int(quantity)
+        except (TypeError, ValueError):
+            return jsonify({"message": "'quantity' must be an integer"}), 400
 
-        # Mark job completed and assign worker
+        if q <= 0:
+            return jsonify({"message": "'quantity' must be greater than zero"}), 400
+
+        current_stock = item['quantity'] or 0
+        if q > current_stock:
+            return jsonify({"message": "Scanned quantity exceeds available stock."}), 409
+
+        new_qty = max(0, current_stock - q)
+        cursor.execute('UPDATE items SET quantity = ? WHERE item_id = ?', (new_qty, item['item_id']))
+
+        requested_qty = job['requested_quantity']
+        picked_qty = (job['picked_quantity'] or 0) + q
+
+        if requested_qty is not None and picked_qty > requested_qty:
+            return jsonify({"message": "Scanned quantity exceeds requested job quantity."}), 409
+
+        new_status = 'Completed'
+        if requested_qty is not None and picked_qty < requested_qty:
+            new_status = 'Partially Picked'
+
+        # Update progress tracking and status.
         cursor.execute(
-            "UPDATE jobs SET status = ?, assigned_to = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?",
-            ('Completed', worker_name, job_id)
+            """
+            UPDATE jobs
+            SET picked_quantity = ?, status = ?, assigned_to = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE job_id = ?
+            """,
+            (picked_qty, new_status, worker_name, job_id)
         )
         conn.commit()
 
-    return jsonify({"message": "QR scan logged and job completed.", "job_id": job_id}), 200
+    return jsonify({
+        "message": "QR scan logged successfully.",
+        "job_id": job_id,
+        "status": new_status,
+        "picked_quantity": picked_qty,
+        "requested_quantity": requested_qty
+    }), 200
 
 
 @app.route('/api/items', methods=['POST'])
