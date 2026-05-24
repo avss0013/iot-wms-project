@@ -16,12 +16,12 @@ import urequests
 # ============================================================================
 
 # WiFi Configuration
-SSID = "your_wifi_network"
-PASSWORD = "your_wifi_password"
+SSID = "ODesigns"
+PASSWORD = "omartaher2004"
 CONNECT_TIMEOUT = 10
 
 # Central Server Configuration
-SERVER_IP = "192.168.1.100"
+SERVER_IP = "192.168.1.100"  # <-- Set this to your PC/server IP before flashing
 SERVER_PORT = 5000
 ENDPOINT = f"http://{SERVER_IP}:{SERVER_PORT}/api/rfid/read"
 DEVICE_ID = "RFID_SCANNER_01"
@@ -271,8 +271,8 @@ class RFIDScanner:
         try:
             print(f"[Server] Sending tag {tag_uid} to server...")
             response = urequests.post(ENDPOINT, json=payload, timeout=5)
-            
-            if response.status_code == 200:
+
+            if response.status_code in (200, 201):
                 print(f"[Server] Tag received successfully (Status: {response.status_code})")
                 data = response.json()
                 print(f"[Server] Response: {data}")

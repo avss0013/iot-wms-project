@@ -99,6 +99,8 @@ python app.py
 - The app expects a `dist` folder for the front-end build when serving static files.
 - The server listens on `0.0.0.0:8080`.
 
+- Devices used by this project use PN532-based RFID modules (ESP32 side). By default the ESP32 scanners are configured to use I2C (SDA GPIO21, SCL GPIO22); see the device `SETUP.md` for wiring and driver instructions.
+
 ## Suggested Next Improvements
 
 - Add a `jobs` table migration or creation step so the API and bootstrap script use the same schema.

@@ -1,16 +1,33 @@
+
 # MicroPython RFID Scanner - Requirements & Libraries
 
 ## MicroPython Version
 - **MicroPython 1.23.0 or later** for ESP32
 
 ## Required Libraries (for MicroPython)
-The following libraries need to be installed on the ESP32:
+The following libraries are commonly needed on the ESP32:
 
 ```
 mpremote mip install urequests  # For HTTP requests
 mpremote mip install utime       # For timestamps (usually built-in)
 mpremote mip install json        # For JSON handling (usually built-in)
 ```
+
+## PN532 Driver
+- The PN532 requires a driver for the chosen interface (I2C or SPI). For MicroPython you can either:
+	- Copy a MicroPython `pn532.py` driver file into the device filesystem (recommended for reproducibility), or
+	- Install a PN532 package via `mip` if available for your environment.
+
+Example (copy driver and install support libs):
+
+```bash
+mpremote connect COM3
+mpremote cp pn532.py :/pn532.py   # copy PN532 MicroPython driver
+mpremote cp rfid_scanner.py :/rfid_scanner.py
+mpremote mip install urequests
+```
+
+For Arduino/C++ development use the `Adafruit PN532` library (Library Manager) or equivalent.
 
 ## Installation Steps
 
@@ -24,6 +41,7 @@ pip install esptool
 esptool.py --port COM3 erase_flash
 esptool.py --port COM3 write_flash -z 0x1000 esp32-20240422-v1.23.bin
 ```
+
 
 ### 2. Install Libraries
 ```bash
@@ -53,7 +71,7 @@ mpremote repl
 
 ## Hardware Compatibility
 - **Boards Tested**: ESP32-WROOM-32, ESP32-WROOM-32U
-- **RFID Module**: RC522 / MFRC522 (13.56 MHz)
+- **RFID Module**: PN532-based breakouts (I2C/SPI/UART)
 - **Tags**: ISO14443A (Mifare Classic, Mifare Ultralight, etc.)
 
 ## Configuration
@@ -71,10 +89,11 @@ If you see `ModuleNotFoundError: no module named 'urequests'`:
 mpremote mip install urequests
 ```
 
-### SPI Communication Issues
+### Communication Issues
 - Verify correct GPIO pins in config
 - Check wiring (especially GND connection)
-- Use oscilloscope to verify SPI signal integrity
+- For I2C: use `i2c.scan()` in REPL to verify PN532 address is visible
+- For SPI: check that the breakout is configured for SPI mode and wiring is correct
 
 ### WiFi Connection Fails
 - Try 2.4GHz WiFi (5GHz not supported)
@@ -82,16 +101,16 @@ mpremote mip install urequests
 - Verify router is broadcasting the network
 
 ### Tag Not Detected
-- Ensure RC522 VCC is 5V (not 3.3V-only)
-- Check antenna connection on RC522 module
-- Try different tag types
+- Ensure tag is ISO14443A compatible
+- Verify PN532 power voltage matches your breakout (3.3V vs 5V)
+- Try different tag orientations and distances
 
 ## Performance Tuning
-- Increase `RFID_BAUDRATE` up to 2-5 MHz for faster reads
+- Adjust polling frequency and driver timeouts in your PN532 driver
 - Decrease `read_cooldown` if reading at same location frequently
 - Adjust `MAX_RETRIES` based on network reliability
 
 ## Power Considerations
-- USB power: 2A minimum recommended
-- Battery: 1000+ mAh LiPo recommended for 4+ hour operation
+- USB power: 1A–2A recommended depending on peripherals
+- Battery: 1000+ mAh LiPo recommended for multi-hour operation
 - Deep sleep available via `machine.deepsleep()` for idle periods
