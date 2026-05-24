@@ -5,7 +5,6 @@ __pycache__/
 
 # Node.js (for your front-end)
 node_modules/
-dist/
 .env
 
 # Database file (never commit your database)
