@@ -8,6 +8,10 @@
       name="description"
       content="IoT WMS dashboard for manager and worker operations"
     />
+    <meta name="theme-color" content="#050816" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/maskable-icon.svg" />
     <link rel="stylesheet" href="/styles.css" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
   </head>
@@ -34,6 +38,7 @@
             <span class="pulse"></span>
             Live system
           </div>
+          <button class="secondary install-button" id="installButton" type="button" hidden>Install app</button>
         </div>
       </header>
 
@@ -271,6 +276,54 @@
                 <button class="ghost" id="refreshWorkerButton" type="button">Refresh queue</button>
               </div>
             </div>
+
+            <section class="qr-panel glass">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">QR capture</p>
+                  <h3>Scan a job code</h3>
+                </div>
+                <div class="panel-badge accent">Camera ready</div>
+              </div>
+
+              <div class="scanner-shell">
+                <div class="scanner-viewport" id="qrScannerViewport">
+                  <video id="qrScannerVideo" muted playsinline></video>
+                  <div class="scanner-overlay">
+                    <span class="scanner-status-dot"></span>
+                    <div>
+                      <strong id="qrScannerStatus">Camera idle</strong>
+                      <p class="scanner-hint">Start the camera, then point it at a QR label or scan an image file.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <form id="qrScanForm" class="card-form scanner-form">
+                  <label class="full-width">
+                    Captured QR code
+                    <input id="qrCodeDataInput" name="qr_code_data" type="text" placeholder="Scan a QR code" required />
+                  </label>
+                  <label>
+                    Job
+                    <select id="qrJobSelect" name="job_id" required></select>
+                  </label>
+                  <label>
+                    Quantity
+                    <input id="qrQuantityInput" name="quantity" type="number" min="1" value="1" />
+                  </label>
+                  <div class="form-actions full-width scanner-actions-row">
+                    <div class="scanner-controls">
+                      <button class="secondary" id="startScannerButton" type="button">Start camera</button>
+                      <button class="secondary" id="stopScannerButton" type="button">Stop camera</button>
+                      <button class="ghost" id="scanImageButton" type="button">Scan image</button>
+                      <input id="scanImageInput" type="file" accept="image/*" capture="environment" hidden />
+                    </div>
+                    <button class="primary" type="submit">Log scan</button>
+                  </div>
+                  <span id="qrScanMessage" class="form-message full-width"></span>
+                </form>
+              </div>
+            </section>
 
             <div id="workerQueue" class="queue-list"></div>
           </article>

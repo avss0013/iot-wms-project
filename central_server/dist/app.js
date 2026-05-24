@@ -6,6 +6,20 @@ const state = {
   locations: [],
   alarms: [],
   system: { status: 'IDLE', active_order_id: null },
+  offlineScanQueue: [],
+  scanner: {
+    active: false,
+    detector: null,
+    stream: null,
+    frameHandle: null,
+    lastDetectedValue: '',
+  },
+  installPromptEvent: null,
+};
+
+const STORAGE_KEYS = {
+  dashboard: 'iwms.dashboard.snapshot',
+  scanQueue: 'iwms.qr.scan.queue',
 };
 
 const elements = {
@@ -34,6 +48,19 @@ const elements = {
   claimNextButton: document.getElementById('claimNextButton'),
   refreshWorkerButton: document.getElementById('refreshWorkerButton'),
   shelfGrid: document.getElementById('shelfGrid'),
+  qrScannerViewport: document.getElementById('qrScannerViewport'),
+  qrScannerVideo: document.getElementById('qrScannerVideo'),
+  qrScannerStatus: document.getElementById('qrScannerStatus'),
+  qrScanForm: document.getElementById('qrScanForm'),
+  qrCodeDataInput: document.getElementById('qrCodeDataInput'),
+  qrJobSelect: document.getElementById('qrJobSelect'),
+  qrQuantityInput: document.getElementById('qrQuantityInput'),
+  qrScanMessage: document.getElementById('qrScanMessage'),
+  startScannerButton: document.getElementById('startScannerButton'),
+  stopScannerButton: document.getElementById('stopScannerButton'),
+  scanImageButton: document.getElementById('scanImageButton'),
+  scanImageInput: document.getElementById('scanImageInput'),
+  installButton: document.getElementById('installButton'),
   ordersChartCtx: document.getElementById('ordersChart')?.getContext('2d'),
   statusChartCtx: document.getElementById('statusChart')?.getContext('2d'),
 };
@@ -45,6 +72,308 @@ let statusChartInstance = null;
 const roleButtons = document.querySelectorAll('[data-role-button]');
 const viewPanels = document.querySelectorAll('[data-view]');
 const systemActionButtons = document.querySelectorAll('[data-system-action]');
+
+function readStoredJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore storage failures in private browsing or when quota is full.
+  }
+}
+
+function persistDashboardSnapshot() {
+  writeStoredJson(STORAGE_KEYS.dashboard, {
+    summary: state.summary,
+    orders: state.orders,
+    items: state.items,
+    locations: state.locations,
+    alarms: state.alarms,
+    system: state.system,
+  });
+}
+
+function hydrateDashboardSnapshot() {
+  const snapshot = readStoredJson(STORAGE_KEYS.dashboard, null);
+  if (!snapshot) return false;
+
+  state.summary = snapshot.summary || {};
+  state.orders = Array.isArray(snapshot.orders) ? snapshot.orders : [];
+  state.items = Array.isArray(snapshot.items) ? snapshot.items : [];
+  state.locations = Array.isArray(snapshot.locations) ? snapshot.locations : [];
+  state.alarms = Array.isArray(snapshot.alarms) ? snapshot.alarms : [];
+  state.system = snapshot.system || { status: 'IDLE', active_order_id: null };
+  return true;
+}
+
+function persistOfflineQueue() {
+  writeStoredJson(STORAGE_KEYS.scanQueue, state.offlineScanQueue);
+}
+
+function hydrateOfflineQueue() {
+  const queued = readStoredJson(STORAGE_KEYS.scanQueue, []);
+  state.offlineScanQueue = Array.isArray(queued) ? queued : [];
+}
+
+function setScanMessage(message, type = 'info') {
+  if (!elements.qrScanMessage) return;
+  elements.qrScanMessage.textContent = message;
+  elements.qrScanMessage.dataset.type = type;
+}
+
+function setScannerStatus(message, active = false) {
+  if (elements.qrScannerStatus) {
+    elements.qrScannerStatus.textContent = message;
+  }
+  if (elements.qrScannerViewport) {
+    elements.qrScannerViewport.classList.toggle('is-scanning', active);
+  }
+}
+
+function setScanInputValue(value) {
+  if (!elements.qrCodeDataInput) return;
+  elements.qrCodeDataInput.value = value;
+}
+
+function isOfflineNetworkError(error) {
+  const message = String(error?.message || '');
+  return !navigator.onLine || /Failed to fetch|NetworkError|Load failed|Network request failed/i.test(message);
+}
+
+function getQueuedScanPayloads() {
+  return state.offlineScanQueue.slice();
+}
+
+function enqueueScan(payload) {
+  state.offlineScanQueue.push({
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    payload,
+    createdAt: new Date().toISOString(),
+  });
+  persistOfflineQueue();
+}
+
+async function flushQueuedScans() {
+  if (!navigator.onLine || !state.offlineScanQueue.length) return;
+
+  const queue = getQueuedScanPayloads();
+  const remaining = [];
+
+  for (const [index, entry] of queue.entries()) {
+    try {
+      await requestJson('/api/qr/read', {
+        method: 'POST',
+        body: JSON.stringify(entry.payload),
+      });
+    } catch (error) {
+      if (isOfflineNetworkError(error)) {
+        remaining.push(entry);
+        remaining.push(...queue.slice(index + 1));
+        setScanMessage('Offline again. The remaining scans stay queued.', 'warning');
+        break;
+      }
+      setScanMessage(`Queued QR scan ${entry.id} could not sync: ${error.message}`, 'error');
+    }
+  }
+
+  state.offlineScanQueue = remaining;
+  persistOfflineQueue();
+
+  if (!remaining.length && queue.length) {
+    setScanMessage('Queued QR scans synced successfully.', 'success');
+    await loadDashboard(true);
+  }
+}
+
+function renderQrJobOptions() {
+  if (!elements.qrJobSelect) return;
+
+  const scanableOrders = state.orders.filter((order) => order.status !== 'Completed');
+  const preferredOrder = String(state.system.active_order_id ?? '');
+
+  if (!scanableOrders.length) {
+    elements.qrJobSelect.innerHTML = '<option value="">No active jobs available</option>';
+    return;
+  }
+
+  elements.qrJobSelect.innerHTML = scanableOrders
+    .map((order) => {
+      const selected = preferredOrder && String(order.job_id) === preferredOrder ? ' selected' : '';
+      const label = `#${order.job_id} ${order.job_type} · ${itemLabel(order.item_id)}`;
+      return `<option value="${order.job_id}"${selected}>${escapeHtml(label)}</option>`;
+    })
+    .join('');
+
+  if (!elements.qrJobSelect.value && scanableOrders[0]) {
+    elements.qrJobSelect.value = String(scanableOrders[0].job_id);
+  }
+}
+
+function updateInstallPromptVisibility() {
+  if (!elements.installButton) return;
+  elements.installButton.hidden = !state.installPromptEvent;
+}
+
+function setOnlineState() {
+  if (!elements.qrScannerStatus) return;
+  if (navigator.onLine) {
+    elements.qrScannerStatus.dataset.connection = 'online';
+    if (!state.scanner.active) {
+      setScannerStatus('Camera idle', false);
+    }
+  } else {
+    elements.qrScannerStatus.dataset.connection = 'offline';
+    setScannerStatus('Offline mode active. Scans will queue until the connection returns.', false);
+  }
+}
+
+function createBarcodeDetector() {
+  if (!('BarcodeDetector' in window)) return null;
+
+  try {
+    return new BarcodeDetector({ formats: ['qr_code'] });
+  } catch {
+    return new BarcodeDetector();
+  }
+}
+
+async function detectQrFromImage(file) {
+  const detector = state.scanner.detector || createBarcodeDetector();
+  if (!detector) {
+    throw new Error('This browser does not support QR detection from images.');
+  }
+
+  state.scanner.detector = detector;
+  const bitmap = typeof createImageBitmap === 'function' ? await createImageBitmap(file) : null;
+  try {
+    if (bitmap) {
+      const barcodes = await detector.detect(bitmap);
+      if (!barcodes.length) {
+        throw new Error('No QR code was detected in that image.');
+      }
+      handleDetectedQr(barcodes[0].rawValue);
+      return;
+    }
+
+    const image = new Image();
+    image.src = URL.createObjectURL(file);
+    await image.decode();
+    const barcodes = await detector.detect(image);
+    if (!barcodes.length) {
+      throw new Error('No QR code was detected in that image.');
+    }
+    handleDetectedQr(barcodes[0].rawValue);
+  } finally {
+    bitmap?.close?.();
+  }
+}
+
+function stopQrScanner(message = 'Camera idle') {
+  state.scanner.active = false;
+  if (state.scanner.frameHandle) {
+    clearTimeout(state.scanner.frameHandle);
+    state.scanner.frameHandle = null;
+  }
+
+  if (state.scanner.stream) {
+    state.scanner.stream.getTracks().forEach((track) => track.stop());
+    state.scanner.stream = null;
+  }
+
+  if (elements.qrScannerVideo) {
+    elements.qrScannerVideo.srcObject = null;
+  }
+
+  setScannerStatus(message, false);
+}
+
+function handleDetectedQr(value) {
+  const code = String(value || '').trim();
+  if (!code) return;
+
+  state.scanner.lastDetectedValue = code;
+  setScanInputValue(code);
+  setScanMessage(`Captured ${code}. Confirm the job to log it.`, 'success');
+  stopQrScanner('QR code captured');
+}
+
+async function scanFrame() {
+  if (!state.scanner.active || !elements.qrScannerVideo || !state.scanner.detector) return;
+
+  try {
+    const barcodes = await state.scanner.detector.detect(elements.qrScannerVideo);
+    if (barcodes.length) {
+      handleDetectedQr(barcodes[0].rawValue);
+      return;
+    }
+  } catch (error) {
+    setScannerStatus(error.message || 'Unable to scan the current frame.', false);
+    stopQrScanner('Camera idle');
+    return;
+  }
+
+  state.scanner.frameHandle = window.setTimeout(scanFrame, 220);
+}
+
+async function startQrScanner() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setScanMessage('Camera access is not available in this browser.', 'error');
+    return;
+  }
+
+  const detector = state.scanner.detector || createBarcodeDetector();
+  if (!detector) {
+    setScanMessage('This browser does not support live QR detection. Use the image picker or type the code manually.', 'error');
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } },
+      audio: false,
+    });
+
+    state.scanner.detector = detector;
+    state.scanner.stream = stream;
+    state.scanner.active = true;
+
+    if (elements.qrScannerVideo) {
+      elements.qrScannerVideo.srcObject = stream;
+      await elements.qrScannerVideo.play();
+    }
+
+    setScannerStatus('Scanning for QR codes...', true);
+    setScanMessage('Camera started. Hold the QR code inside the frame.', 'info');
+    scanFrame();
+  } catch (error) {
+    stopQrScanner('Camera idle');
+    setScanMessage(error.message || 'Unable to start the camera.', 'error');
+  }
+}
+
+function hydrateLiveState() {
+  hydrateDashboardSnapshot();
+  hydrateOfflineQueue();
+  renderQrJobOptions();
+  renderSystem();
+  renderMetrics();
+  renderItems();
+  renderLocationSelects();
+  renderLocations();
+  renderAlarms();
+  renderOrders();
+  renderShelf();
+  renderCharts();
+}
 
 function setRole(role) {
   state.role = role;
@@ -367,6 +696,8 @@ function renderOrders() {
         )
         .join('')
     : '<div class="empty-state">No work queued.</div>';
+
+  renderQrJobOptions();
 }
 
 function bindTableActions() {
@@ -419,23 +750,25 @@ async function requestJson(url, options = {}) {
   return payload;
 }
 
-async function loadDashboard() {
-  const [summary, system, orders, items, locations, alarms] = await Promise.all([
-    requestJson('/api/dashboard/summary').catch(() => ({})),
-    requestJson('/api/system/status').catch(() => ({ status: 'UNKNOWN', active_order_id: null })),
-    requestJson('/api/orders').catch(() => []),
-    requestJson('/api/items').catch(() => []),
-    requestJson('/api/storage/locations').catch(() => []),
-    requestJson('/api/alarms').catch(() => []),
+async function loadDashboard(preserveMessages = false) {
+  const snapshot = preserveMessages ? readStoredJson(STORAGE_KEYS.dashboard, null) : null;
+  const [summaryResult, systemResult, ordersResult, itemsResult, locationsResult, alarmsResult] = await Promise.allSettled([
+    requestJson('/api/dashboard/summary'),
+    requestJson('/api/system/status'),
+    requestJson('/api/orders'),
+    requestJson('/api/items'),
+    requestJson('/api/storage/locations'),
+    requestJson('/api/alarms'),
   ]);
 
-  state.summary = summary;
-  state.system = system;
-  state.orders = orders;
-  state.items = items;
-  state.locations = locations;
-  state.alarms = alarms;
+  state.summary = summaryResult.status === 'fulfilled' ? summaryResult.value : snapshot?.summary || state.summary || {};
+  state.system = systemResult.status === 'fulfilled' ? systemResult.value : snapshot?.system || state.system || { status: 'IDLE', active_order_id: null };
+  state.orders = ordersResult.status === 'fulfilled' ? ordersResult.value : snapshot?.orders || state.orders || [];
+  state.items = itemsResult.status === 'fulfilled' ? itemsResult.value : snapshot?.items || state.items || [];
+  state.locations = locationsResult.status === 'fulfilled' ? locationsResult.value : snapshot?.locations || state.locations || [];
+  state.alarms = alarmsResult.status === 'fulfilled' ? alarmsResult.value : snapshot?.alarms || state.alarms || [];
 
+  persistDashboardSnapshot();
   renderSystem();
   renderMetrics();
   renderItems();
@@ -446,6 +779,11 @@ async function loadDashboard() {
   renderShelf();
   renderCharts();
   bindTableActions();
+  renderQrJobOptions();
+
+  if (!preserveMessages) {
+    await flushQueuedScans();
+  }
 }
 
 async function createItem(event) {
@@ -552,6 +890,46 @@ async function runSystemAction(action) {
   }
 }
 
+async function submitQrScan(event) {
+  event.preventDefault();
+
+  const formData = new FormData(elements.qrScanForm);
+  const payload = Object.fromEntries(formData.entries());
+  payload.job_id = payload.job_id ? Number.parseInt(payload.job_id, 10) : null;
+  payload.quantity = payload.quantity ? Number.parseInt(payload.quantity, 10) : null;
+  payload.worker_name = (elements.workerName?.value || 'Worker').trim() || 'Worker';
+
+  if (!payload.qr_code_data) {
+    setScanMessage('Scan or enter a QR code first.', 'error');
+    return;
+  }
+
+  if (!payload.job_id) {
+    setScanMessage('Choose the job this scan belongs to.', 'error');
+    return;
+  }
+
+  try {
+    setScanMessage('Submitting QR scan...', 'info');
+    await requestJson('/api/qr/read', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    setScanMessage('QR scan logged successfully.', 'success');
+    elements.qrScanForm.reset();
+    elements.qrQuantityInput.value = '1';
+    await loadDashboard();
+  } catch (error) {
+    if (isOfflineNetworkError(error)) {
+      enqueueScan(payload);
+      setScanMessage('Offline right now. The scan has been queued and will sync when you reconnect.', 'warning');
+      return;
+    }
+
+    setScanMessage(error.message, 'error');
+  }
+}
+
 roleButtons.forEach((button) => {
   button.addEventListener('click', () => setRole(button.dataset.roleButton));
 });
@@ -567,7 +945,60 @@ elements.refreshWorkerButton.addEventListener('click', loadDashboard);
 elements.orderForm.addEventListener('submit', createOrder);
 elements.itemForm?.addEventListener('submit', createItem);
 elements.locationForm?.addEventListener('submit', createLocation);
+elements.qrScanForm?.addEventListener('submit', submitQrScan);
+elements.startScannerButton?.addEventListener('click', startQrScanner);
+elements.stopScannerButton?.addEventListener('click', () => stopQrScanner());
+elements.scanImageButton?.addEventListener('click', () => elements.scanImageInput?.click());
+elements.scanImageInput?.addEventListener('change', async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  try {
+    setScanMessage('Scanning image...', 'info');
+    await detectQrFromImage(file);
+  } catch (error) {
+    setScanMessage(error.message, 'error');
+  } finally {
+    event.target.value = '';
+  }
+});
+
+elements.installButton?.addEventListener('click', async () => {
+  if (!state.installPromptEvent) return;
+
+  state.installPromptEvent.prompt();
+  await state.installPromptEvent.userChoice;
+  state.installPromptEvent = null;
+  updateInstallPromptVisibility();
+});
+
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  state.installPromptEvent = event;
+  updateInstallPromptVisibility();
+});
+
+window.addEventListener('appinstalled', () => {
+  state.installPromptEvent = null;
+  updateInstallPromptVisibility();
+});
+
+window.addEventListener('online', async () => {
+  setOnlineState();
+  await flushQueuedScans();
+});
+
+window.addEventListener('offline', setOnlineState);
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch((error) => {
+    console.warn('Service worker registration failed:', error);
+  });
+}
 
 setRole('manager');
+hydrateLiveState();
+setOnlineState();
+updateInstallPromptVisibility();
 loadDashboard();
 setInterval(loadDashboard, 5000);
