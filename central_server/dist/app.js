@@ -383,7 +383,7 @@ function setRole(role) {
 
 function statusClass(status) {
   const normalized = String(status || '').toLowerCase();
-  if (normalized.includes('progress')) return 'status-progress';
+  if (normalized.includes('progress') || normalized.includes('scanned') || normalized.includes('partial')) return 'status-progress';
   if (normalized.includes('complete')) return 'status-completed';
   if (normalized.includes('running')) return 'status-running';
   if (normalized.includes('idle') || normalized.includes('error')) return 'status-idle';
@@ -652,12 +652,17 @@ function renderOrders() {
       const itemText = itemLabel(order.item_id);
       const statusTag = `<span class="status-tag ${statusClass(order.status)}">${escapeHtml(order.status)}</span>`;
       const actions = [];
+      const normalizedStatus = String(order.status || '').toLowerCase();
 
-      if (order.status === 'Pending') {
+      if (normalizedStatus === 'pending') {
         actions.push(`<button class="secondary order-claim" data-order-id="${order.job_id}" type="button">Claim</button>`);
       }
 
-      if (order.status === 'In Progress') {
+      if (normalizedStatus === 'awaiting scan') {
+        actions.push('<span class="form-message" data-type="info">Scan bundle RFID to start</span>');
+      }
+
+      if (['in progress', 'at location', 'item scanned', 'partially picked'].includes(normalizedStatus)) {
         actions.push(`<button class="secondary order-complete" data-order-id="${order.job_id}" type="button">Complete</button>`);
       }
 
@@ -687,9 +692,11 @@ function renderOrders() {
                 <p class="queue-meta">${escapeHtml(itemLabel(order.item_id))} · ${escapeHtml(order.status)} · ${escapeHtml(order.assigned_to || 'Unassigned')}</p>
               </div>
               ${
-                order.status === 'Pending'
+                String(order.status || '').toLowerCase() === 'pending'
                   ? `<button class="secondary queue-claim" data-order-id="${order.job_id}" type="button">Claim</button>`
-                  : `<button class="secondary queue-complete" data-order-id="${order.job_id}" type="button">Complete</button>`
+                  : String(order.status || '').toLowerCase() === 'awaiting scan'
+                    ? `<span class="form-message" data-type="info">Scan to confirm</span>`
+                    : `<button class="secondary queue-complete" data-order-id="${order.job_id}" type="button">Complete</button>`
               }
             </article>
           `,
@@ -837,15 +844,18 @@ async function createOrder(event) {
   const formData = new FormData(elements.orderForm);
   const payload = Object.fromEntries(formData.entries());
 
+  payload.require_scan = true;
+  payload.requested_quantity = payload.requested_quantity ? Number.parseInt(payload.requested_quantity, 10) : null;
+
   try {
     setMessage('Creating order...');
-    await requestJson('/api/orders', {
+    const response = await requestJson('/api/orders', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
     elements.orderForm.reset();
     renderItems();
-    setMessage('Order created successfully.', 'success');
+    setMessage(`Order #${response.job_id} created. Scan the bundle RFID tag to confirm and start.`, 'success');
     await loadDashboard();
   } catch (error) {
     setMessage(error.message, 'error');
