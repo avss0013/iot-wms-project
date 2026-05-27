@@ -142,7 +142,7 @@
               </label>
               <label>
                 Description
-                <input name="description" type="text" placeholder="Blue container bolts" required />
+                <input name="description" type="text" placeholder="Enter item description" required />
               </label>
               <label>
                 Location
@@ -233,11 +233,21 @@
             <form id="orderForm" class="card-form">
               <label>
                 Order type
-                <input name="job_type" type="text" placeholder="Pick, Putaway, Replenish" required />
+                <select name="job_type" id="jobTypeSelect" required>
+                  <option value="">-- Select order type --</option>
+                  <option value="pick">Pick (take from rack)</option>
+                  <option value="put">Put (store to rack)</option>
+                  <option value="move">Move (rack to rack)</option>
+                  <option value="count">Count (inventory audit)</option>
+                </select>
               </label>
-              <label>
+              <label id="itemLabelWrapper">
                 Item
                 <select name="item_id" id="itemSelect" required></select>
+              </label>
+              <label id="rackLabelWrapper" style="display: none;">
+                Rack to count
+                <select name="location_id" id="rackSelect" required></select>
               </label>
               <label class="full-width">
                 Notes

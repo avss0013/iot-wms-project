@@ -29,6 +29,13 @@ MQTT_BROKER = 'localhost'
 MQTT_PORT = 1883
 MQTT_TOPIC_RFID = 'warehouse/rfid'
 
+# --- Job Types ---
+# Supported job types in the warehouse management system:
+#   - pick:  Pick an item out from a rack
+#   - put:   Put an item into a rack
+#   - move:  Move an item from one rack to another
+#   - count: Count the items in a rack
+
 # --- In-Memory State Management for ASRS ---
 # This dictionary holds the live status of the ASRS. It's faster than
 # constantly reading from the database for real-time updates.
@@ -185,16 +192,61 @@ def create_order():
     data = request.get_json(silent=True) or {}
     job_type = data.get('job_type', '').strip()
     item_id = data.get('item_id')
+    location_id = data.get('location_id')
     notes = (data.get('notes') or '').strip()
-    print(f"[API POST] /api/orders - Creating new {job_type} job for item {item_id}")
     
-    if not job_type or not item_id:
-        return jsonify({"message": "Missing 'job_type' or 'item_id'"}), 400
+    if not job_type:
+        return jsonify({"message": "Missing 'job_type'"}), 400
+
+    # Handle 'count' job type - uses location_id to create a count task for a rack
+    if job_type == 'count':
+        if not location_id:
+            return jsonify({"message": "Missing 'location_id' for count job"}), 400
+        
+        try:
+            location_id = int(location_id)
+        except (TypeError, ValueError):
+            return jsonify({"message": "'location_id' must be a number"}), 400
+        
+        print(f"[API POST] /api/orders - Creating new count job for location {location_id}")
+        
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            # For count jobs, we create a temporary item linked to the location
+            # This allows us to maintain referential integrity
+            generated_qr = f"COUNT-{uuid.uuid4().hex[:8].upper()}"
+            
+            try:
+                cursor.execute(
+                    'INSERT INTO items (qr_code_data, description, location_id, quantity) VALUES (?, ?, ?, ?)',
+                    (generated_qr, f'Count job for location {location_id}', location_id, 0)
+                )
+                temp_item_id = cursor.lastrowid
+            except sqlite3.IntegrityError:
+                return jsonify({"message": "Failed to create temporary item for count job"}), 409
+            
+            cursor.execute(
+                '''
+                INSERT INTO jobs (job_type, item_id, status, assigned_to, notes)
+                VALUES (?, ?, ?, ?, ?)
+                ''',
+                (job_type, temp_item_id, 'Pending', None, notes)
+            )
+            conn.commit()
+            new_job_id = cursor.lastrowid
+        
+        return jsonify({"message": "Count order created successfully.", "job_id": new_job_id}), 201
+    
+    # Handle regular job types (pick, put, move)
+    if not item_id:
+        return jsonify({"message": "Missing 'item_id' for this job type"}), 400
 
     try:
         item_id = int(item_id)
     except (TypeError, ValueError):
         return jsonify({"message": "'item_id' must be a number"}), 400
+
+    print(f"[API POST] /api/orders - Creating new {job_type} job for item {item_id}")
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -465,7 +517,37 @@ def rfid_read():
 
             return jsonify({"message": "Item scanned but no matching job in correct state."}), 200
 
-        return jsonify({"message": "Tag UID not recognised."}), 404
+        # If tag not recognised, auto-create a placeholder item and a pending 'count' job
+        try:
+            generated_qr = f"AUTO-{uuid.uuid4().hex[:10].upper()}"
+            cursor.execute(
+                'INSERT INTO items (qr_code_data, rfid_uid, description, location_id, quantity) VALUES (?, ?, ?, ?, ?)',
+                (generated_qr, tag_uid, f'Auto-created item from RFID {tag_uid}', None, 0)
+            )
+            item_id = cursor.lastrowid
+
+            cursor.execute(
+                'INSERT INTO jobs (job_type, item_id, status, assigned_to, notes) VALUES (?, ?, ?, ?, ?)',
+                ('count', item_id, 'Pending', None, 'Auto-created from unrecognized RFID scan')
+            )
+            conn.commit()
+            new_job_id = cursor.lastrowid
+
+            # Try to generate a QR image for the new auto-created item
+            try:
+                qrc_dir = os.path.join(os.path.dirname(__file__), 'qrcodes')
+                os.makedirs(qrc_dir, exist_ok=True)
+                qr_path = os.path.join(qrc_dir, f"{generated_qr}.png")
+                if not os.path.exists(qr_path):
+                    img = qrcode.make(generated_qr)
+                    img.save(qr_path)
+            except Exception as e:
+                print(f"[QR] Failed to generate QR image for auto-created item: {e}")
+
+            return jsonify({"message": "Unrecognised tag: item and investigation job created.", "item_id": item_id, "job_id": new_job_id}), 201
+        except sqlite3.IntegrityError:
+            # Race: item or QR already exists; return generic not found
+            return jsonify({"message": "Tag UID not recognised (conflict on creation)."}), 409
 
 
 @app.route('/api/qr/read', methods=['POST'])

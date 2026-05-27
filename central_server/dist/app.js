@@ -48,6 +48,10 @@ const elements = {
   claimNextButton: document.getElementById('claimNextButton'),
   refreshWorkerButton: document.getElementById('refreshWorkerButton'),
   shelfGrid: document.getElementById('shelfGrid'),
+  jobTypeSelect: document.getElementById('jobTypeSelect'),
+  itemLabelWrapper: document.getElementById('itemLabelWrapper'),
+  rackLabelWrapper: document.getElementById('rackLabelWrapper'),
+  rackSelect: document.getElementById('rackSelect'),
   qrScannerViewport: document.getElementById('qrScannerViewport'),
   qrScannerVideo: document.getElementById('qrScannerVideo'),
   qrScannerStatus: document.getElementById('qrScannerStatus'),
@@ -504,8 +508,9 @@ function renderShelf() {
         ).length;
         return `
           <div class="shelf-item">
-            <div>
-              <strong>${escapeHtml(location.id || location.description || 'Rack')}</strong>
+            <div class="shelf-content">
+              <strong>${escapeHtml(location.description || location.id || 'Rack')}</strong>
+              <div class="shelf-count">${itemsInRack}</div>
               <small>${itemsInRack} item${itemsInRack !== 1 ? 's' : ''}</small>
             </div>
           </div>
@@ -513,6 +518,36 @@ function renderShelf() {
       },
     )
     .join('');
+}
+
+function renderRackSelect() {
+  if (!elements.rackSelect) return;
+  elements.rackSelect.innerHTML = state.locations.length
+    ? state.locations
+        .map((location) => {
+          const itemsInRack = state.items.filter(
+            (item) => Number(item.location_id) === Number(location.location_id || location.id),
+          ).length;
+          const label = `${location.description || location.id || 'Rack'} (${itemsInRack} items)`;
+          return `<option value="${location.location_id || location.id}">${escapeHtml(label)}</option>`;
+        })
+        .join('')
+    : '<option value="">No racks available</option>';
+}
+
+function toggleJobTypeFields() {
+  const selectedType = elements.jobTypeSelect?.value;
+  if (selectedType === 'count') {
+    elements.itemLabelWrapper.style.display = 'none';
+    elements.rackLabelWrapper.style.display = 'block';
+    elements.itemSelect.removeAttribute('required');
+    elements.rackSelect.setAttribute('required', 'required');
+  } else {
+    elements.itemLabelWrapper.style.display = 'block';
+    elements.rackLabelWrapper.style.display = 'none';
+    elements.itemSelect.setAttribute('required', 'required');
+    elements.rackSelect.removeAttribute('required');
+  }
 }
 
 function renderCharts() {
@@ -776,6 +811,7 @@ async function loadDashboard(preserveMessages = false) {
   renderLocations();
   renderAlarms();
   renderOrders();
+  renderRackSelect();
   renderShelf();
   renderCharts();
   bindTableActions();
@@ -845,6 +881,8 @@ async function createOrder(event) {
     });
     elements.orderForm.reset();
     renderItems();
+    renderRackSelect();
+    toggleJobTypeFields();
     setMessage('Order created successfully.', 'success');
     await loadDashboard();
   } catch (error) {
@@ -943,6 +981,7 @@ document.querySelector('[data-action="claim-next"]').addEventListener('click', (
 elements.claimNextButton.addEventListener('click', () => claimOrder());
 elements.refreshWorkerButton.addEventListener('click', loadDashboard);
 elements.orderForm.addEventListener('submit', createOrder);
+elements.jobTypeSelect?.addEventListener('change', toggleJobTypeFields);
 elements.itemForm?.addEventListener('submit', createItem);
 elements.locationForm?.addEventListener('submit', createLocation);
 elements.qrScanForm?.addEventListener('submit', submitQrScan);

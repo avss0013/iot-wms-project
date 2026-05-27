@@ -55,8 +55,8 @@ def initialize_database(db_path='warehouse.db'):
 	cursor.execute("INSERT OR IGNORE INTO locations (location_id, rfid_uid, description) VALUES (?, ?, ?)", (2, '87654321', 'Rack B2'))
 	cursor.execute("INSERT OR IGNORE INTO items (item_id, qr_code_data, rfid_uid, description, location_id, quantity) VALUES (?, ?, ?, ?, ?, ?)", (1, 'ITEM-001', 'TAGITEM01', 'Blue container bolts', 1, 100))
 	cursor.execute("INSERT OR IGNORE INTO items (item_id, qr_code_data, rfid_uid, description, location_id, quantity) VALUES (?, ?, ?, ?, ?, ?)", (2, 'ITEM-002', 'TAGITEM02', 'Motor controller unit', 2, 5))
-	cursor.execute("INSERT OR IGNORE INTO jobs (job_id, job_type, item_id, status, assigned_to, notes) VALUES (?, ?, ?, ?, ?, ?)", (1, 'Pick', 1, 'Pending', None, 'Move the blue container bolts to dispatch.'))
-	cursor.execute("INSERT OR IGNORE INTO jobs (job_id, job_type, item_id, status, assigned_to, notes) VALUES (?, ?, ?, ?, ?, ?)", (2, 'Putaway', 2, 'In Progress', 'Worker A', 'Return the motor controller unit to storage.'))
+	cursor.execute("INSERT OR IGNORE INTO jobs (job_id, job_type, item_id, status, assigned_to, notes) VALUES (?, ?, ?, ?, ?, ?)", (1, 'pick', 1, 'Pending', None, 'Move the blue container bolts to dispatch.'))
+	cursor.execute("INSERT OR IGNORE INTO jobs (job_id, job_type, item_id, status, assigned_to, notes) VALUES (?, ?, ?, ?, ?, ?)", (2, 'put', 2, 'In Progress', 'Worker A', 'Return the motor controller unit to storage.'))
 
 	conn.commit()
 	conn.close()
