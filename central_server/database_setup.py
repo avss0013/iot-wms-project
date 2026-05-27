@@ -42,6 +42,9 @@ def initialize_database(db_path='warehouse.db'):
 		job_id INTEGER PRIMARY KEY AUTOINCREMENT,
 		job_type TEXT NOT NULL,
 		item_id INTEGER NOT NULL,
+		requested_quantity INTEGER,
+		picked_quantity INTEGER NOT NULL DEFAULT 0,
+		unit TEXT,
 		status TEXT NOT NULL DEFAULT 'Pending',
 		assigned_to TEXT,
 		notes TEXT,
@@ -50,6 +53,9 @@ def initialize_database(db_path='warehouse.db'):
 		FOREIGN KEY (item_id) REFERENCES items (item_id)
 	)
 	''')
+	_ensure_column(cursor, 'jobs', 'requested_quantity', 'requested_quantity INTEGER')
+	_ensure_column(cursor, 'jobs', 'picked_quantity', 'picked_quantity INTEGER NOT NULL DEFAULT 0')
+	_ensure_column(cursor, 'jobs', 'unit', 'unit TEXT')
 
 	cursor.execute("INSERT OR IGNORE INTO locations (location_id, rfid_uid, description) VALUES (?, ?, ?)", (1, '12345678', 'Rack A1'))
 	cursor.execute("INSERT OR IGNORE INTO locations (location_id, rfid_uid, description) VALUES (?, ?, ?)", (2, '87654321', 'Rack B2'))
